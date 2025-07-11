@@ -1,0 +1,62 @@
+Most Probable Areas to Investigate (Prioritized)
+Incoming Packet Path (PHY -> AXI Ethernet -> AXI DMA -> DDR4):
+
+Is the AXI Ethernet IP correctly receiving data from the PHY? While the link is up, are the actual data pins (RGMII, MII, etc.) carrying data correctly into the AXI Ethernet IP?
+
+Is the AXI DMA correctly receiving data from the AXI Ethernet and writing it to DDR4?
+
+Crucial Debugging Step: ILA on AXI Stream: Place an ILA (Integrated Logic Analyzer) on the AXI Stream interface between the AXI Ethernet (M_AXIS_RX) and the AXI DMA (S_AXIS_S2MM).
+
+Trigger on TVALID (from AXI Ethernet) going high.
+
+Expect to see: Valid data (TDATA), TVALID asserted, and TREADY (from DMA) asserted for the duration of the packet.
+
+If you see TVALID but no TREADY from DMA: The DMA is not ready to accept data, or its configuration is wrong.
+
+If you see no TVALID: The AXI Ethernet IP isn't forwarding data to the DMA, even if it's receiving it from the PHY. This could be due to internal AXI Ethernet configuration issues (e.g., not enabled for Rx, or filtering packets).
+
+Is the AXI DMA successfully writing to the DDR4 memory?
+
+Memory Inspection: After sending an ARP request from your PC, use the Vitis debugger's memory view to inspect the RxBuffer regions in DDR4. Do you see the raw Ethernet/ARP packet data there?
+
+If YES: Great! The hardware path to DDR4 is working. The problem is now in the Microblaze/LwIP processing of that data.
+
+If NO: The DMA is not writing correctly to DDR4. This could be a DMA configuration issue (address, length, transfer type), or a problem with DDR4 access (though less likely if Microblaze code itself runs from DDR4).
+
+Microblaze/LwIP Processing of Received Packet:
+
+Interrupts from AXI DMA (S2MM) and AXI Ethernet (IP2INTC_IRPT):
+
+Debugging with Vitis: Set breakpoints in XAxiDma_S2MM_InterruptHandler (for RX DMA completion) and XAxiEthernet_InterruptHandler (for packet reception).
+
+Do these breakpoints hit when you send an ARP request?
+
+If NO: Review your interrupt controller connections, the xlconcat setup, XIntc_Connect, XIntc_Enable, and Xil_ExceptionEnable(). This is fundamental for DMA-driven packet reception.
+
+If YES: Step through the handlers. Is the DMA status indicating success? Is the xaxiemacif.c layer correctly identifying the received packet and passing it to LwIP (e.g., via xemacif_input())?
+
+LwIP Event Processing (If Baremetal): Ensure you are actively and frequently calling xemacif_input(&netif) (or the equivalent LwIP receive polling function for your port) in your main loop. This is what pulls the received packets from the xaxiemacif.c driver's queue and feeds them into the LwIP stack for processing. If this isn't called, or not called often enough, LwIP will never "see" the ARP request.
+
+LwIP Generating ARP Reply:
+
+Assuming the packet is received and processed, is LwIP configured to respond to ARP requests for its assigned IP address?
+
+Check LwIP logs (if enabled): If you have LwIP debug/trace prints enabled, they might indicate if an ARP request was received and if a reply was generated.
+
+Validate IP/MAC: Ensure the IP address, subnet mask, and MAC address configured in LwIP match your intended network setup and are correct for the device. If the IP or MAC is wrong, LwIP won't respond.
+
+Outgoing Packet Path (DDR4 -> AXI DMA -> AXI Ethernet -> PHY):
+
+Has LwIP generated an ARP reply and is it trying to send it?
+
+DMA TX Path: If LwIP generates a reply, xaxiemacif.c will initiate a DMA transfer to send it.
+
+Debugging with Vitis: Set a breakpoint in XAxiDma_MM2S_InterruptHandler (for TX DMA completion). Does it hit after LwIP tries to send a packet?
+
+ILA on AXI Stream (TX): Place an ILA on the AXI Stream interface between the AXI DMA (M_AXIS_MM2S) and the AXI Ethernet (S_AXIS_TX). Trigger on TVALID.
+
+If you see TVALID from DMA: The DMA is trying to send. Now check if AXI Ethernet is asserting TREADY and consuming the data.
+
+If you see no TVALID from DMA: The DMA isn't being triggered to send (LwIP didn't generate a reply, or xaxiemacif.c failed to initiate the DMA transfer).
+
+Cache Coherency (TX): Re-confirm Xil_DCacheFlushRange() is called on the TX buffer before the DMA transfer.
